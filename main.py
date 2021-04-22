@@ -1,87 +1,80 @@
+"""Script to parse the different bank's data and write to a single file in unified form."""
 import csv
+from collections import OrderedDict
+from datetime import datetime, date
 import glob
 import json
 import os
 import sys
-from datetime import datetime, date
+import typing as t
 
-# sys.path.insert(0, os.path.abspath(os.path.join(__file__, "../")))
-from banks_structure import banks_structure
+from banks_structure import BANKS_CONFIG, UNIFIED_BANK_HEADER
 
-converted_data = []
+UNIFIED_FILE = "unified_csv.csv"
 
 
-def read_csv(bank_name, bank_file, bank_spec):
-    """Read csv file and create a list of data for each file"""
+def get_bank_by_file_path(dir: str) -> dict:
+    """This function return bank by its file path."""
+    return {
+        os.path.basename(file).split(".")[0]: file for file in glob.glob(dir + "/*.csv")
+    }
+
+
+def read_from_csv(
+    bank_name: str, bank_file: str, bank_spec: dict
+) -> t.List[OrderedDict[t.Any, t.Any]]:
+    """Read csv file and create a list of data for each file."""
     with open(bank_file) as csv_file:
         csv_data = csv.DictReader(csv_file)
-        for dict_data in csv_data:
-            new_dict = {}
-            for field in bank_spec[bank_name]['fields']:
-                name = field['name']
-                csv_value = dict_data[name]
-                new_dict["bank_name"] = bank_name
-                try:
-                    if field['type'] == 'int':
-                        new_dict[name] = int(csv_value)
-                    elif field['type'] == 'float':
-                        new_dict[name] = float(csv_value)
-                    elif field['type'] == 'date':
-                        dt_temp = datetime.strptime(csv_value, field['format'])
-                        new_dict[name] = date(dt_temp.year,
-                                              dt_temp.month,
-                                              dt_temp.day)
-                    else:
-                        new_dict[name] = csv_value
-                except:
-                    continue
-            converted_data.append(new_dict)
-    return converted_data
+        unified_data: t.List[OrderedDict[t.Any, t.Any]] = []
+        for bank_data in csv_data:
+            # Combine fields if required as per calculation
+            for rule in bank_spec["transform_to"]:
+                ops, field1, field2 = rule
+                if ops == "add_fields":
+                    bank_data[field1] = float(bank_data[field1]) + float(
+                        bank_data.pop(field2)
+                    )
+                elif ops == "divide":
+                    bank_data[field1] = int(bank_data[field1]) / field2
+
+            # Replace the key name as per unified csv
+            for key, value in bank_spec["replace_keys"].items():
+                bank_data[value] = bank_data.pop(key)
+
+            # Convert the date format in required form
+            dt_temp = datetime.strptime(bank_data["date"], bank_spec["date_format"])
+            bank_data["date"] = str(date(dt_temp.year, dt_temp.month, dt_temp.day))
+            unified_data.append(bank_data)
+    return unified_data
 
 
-def transform(data, transform_to, bank_name):
-    """Transform the data to another value"""
-    for data_dict in data:
-        if data_dict["bank_name"] == bank_name:
-            for rule in transform_to:
-                name = rule[1]
-                if rule[0] == 'add_fields':
-                    data_dict[name] = data_dict[name] + data_dict[rule[2]]
-                elif rule[0] == 'divide':
-                    data_dict[name] = data_dict[name] / rule[2]
+def write_to_csv(
+    unified_data: t.List[OrderedDict[t.Any, t.Any]], unified_file: str = UNIFIED_FILE
+) -> None:
+    """Write converted data to csv file."""
+    with open(unified_file, "a", newline="\n") as csv_file:
+        csv_output = csv.DictWriter(csv_file, fieldnames=UNIFIED_BANK_HEADER)
+        if csv_file.tell() == 0:
+            csv_output.writeheader()
+        csv_output.writerows(unified_data)
 
 
-def to_csv_file(bank_data, csv_spec, file_path_by_name):
-    """Write converted data to csv file"""
-    with open("unified_csv.csv", 'w') as csv_file:
-        header = []
-        bank_name = list(file_path_by_name.keys())[0]
-        for field in csv_spec[bank_name]["to_csv"]:
-            header.append(field['name'])
+if __name__ == "__main__":
+    # Remove the existing output file if exists.
+    if os.path.exists(UNIFIED_FILE):
+        os.remove(UNIFIED_FILE)
 
-        csv_output = csv.writer(csv_file)
-        csv_output.writerow(header)
+    file_path_by_name = get_bank_by_file_path(dir="bankdata")
+    for bank_name, file_path in file_path_by_name.items():
+        # Read bank's CSV file
+        try:
+            unified_data = read_from_csv(bank_name, file_path, BANKS_CONFIG[bank_name])
+        except Exception as exc:
+            print(f"Error while reading bank {bank_name!r} data from its csv: {exc}")
 
-        for bank_name in file_path_by_name.keys():
-            for dict_fields in bank_data:
-                data_list = []
-                if bank_name == dict_fields["bank_name"]:
-                    for field in csv_spec[bank_name]["to_csv"]:
-                        data_list.append(dict_fields[field['field']])
-                    csv_output.writerow(data_list)
-
-
-if __name__ == '__main__':
-    file_path_by_name = {os.path.basename(file).split(".")[0]: file for file in glob.glob("bankdata" + '/*.csv')}
-
-    for bank_name, bank_file in file_path_by_name.items():
-        # Read CSV file
-        read_csv(bank_name, bank_file, banks_structure)
-
-        # Do conversions if required
-        bank_info = banks_structure[bank_name]
-        if 'transform' in bank_info:
-            transform(converted_data, bank_info['transform'], bank_name)
-    
-    # Write to unified csv file
-    to_csv_file(converted_data, banks_structure, file_path_by_name)
+        # Write to unified csv file
+        try:
+            write_to_csv(unified_data)
+        except Exception as exc:
+            print(f"Error while writing bank {bank_name!r} data to unified CSV: {exc}")
